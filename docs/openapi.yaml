@@ -1,0 +1,82 @@
+openapi: 3.1.0
+info:
+  title: user-service API
+  version: 1.0.0
+servers:
+  - url: ${APP_PUBLIC_URL}
+paths:
+  /auth/signup:
+    post:
+      summary: Start signup (2-step)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, format: email}
+                password: {type: string, minLength: 8}
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uuid: {type: string, format: uuid}
+  /auth/code-verification:
+    post:
+      summary: Verify signup code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [uuid, code]
+              properties:
+                uuid: {type: string, format: uuid}
+                code: {type: string}
+      responses:
+        "200": {description: OK}
+  /auth/signin:
+    post:
+      summary: Sign in
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: {type: string, format: email}
+                password: {type: string}
+      responses:
+        "200": {description: JWT tokens}
+  /users/me:
+    get:
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: Profile}
+    patch:
+      security: [{bearerAuth: []}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name: {type: string}
+                avatar_url: {type: string}
+      responses:
+        "200": {description: Updated}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
