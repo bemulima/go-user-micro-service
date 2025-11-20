@@ -45,15 +45,19 @@ type oauthCallbackResponse struct {
 }
 
 type oauthCallbackRequest struct {
-	Email       string  `json:"email"`
-	DisplayName *string `json:"display_name"`
-	AvatarURL   *string `json:"avatar_url"`
+	ProviderType   string                 `json:"provider_type"`
+	ProviderUserID string                 `json:"provider_user_id"`
+	Email          string                 `json:"email"`
+	DisplayName    *string                `json:"display_name"`
+	AvatarURL      *string                `json:"avatar_url"`
+	Metadata       map[string]interface{} `json:"metadata"`
 }
 
 func (h *AuthHandler) RegisterRoutes(g *echo.Group) {
 	g.POST("/signup", h.Signup)
 	g.POST("/code-verification", h.Verify)
 	g.POST("/signin", h.SignIn)
+	g.POST("/oauth/callback", h.HandleOAuthCallback)
 	g.POST("/oauth/:provider/callback", h.OAuthCallback)
 }
 
@@ -100,17 +104,16 @@ func (h *AuthHandler) OAuthCallback(c echo.Context) error {
 	if err := c.Bind(req); err != nil {
 		return res.ErrorJSON(c, http.StatusBadRequest, "bad_request", "invalid payload", requestIDFromCtx(c), nil)
 	}
-	if req.Email == "" {
-		return res.ErrorJSON(c, http.StatusBadRequest, "bad_request", "email required", requestIDFromCtx(c), nil)
-	}
-
-	user, tokens, err := h.auth.HandleOAuthCallback(c.Request().Context(), requestIDFromCtx(c), provider, service.OAuthUserInfo{
-		Email:       req.Email,
-		DisplayName: req.DisplayName,
-		AvatarURL:   req.AvatarURL,
+	user, tokens, err := h.auth.HandleOAuthCallback(c.Request().Context(), requestIDFromCtx(c), service.OAuthUserInfo{
+		ProviderType:   req.ProviderType,
+		ProviderUserID: req.ProviderUserID,
+		Email:          req.Email,
+		DisplayName:    req.DisplayName,
+		AvatarURL:      req.AvatarURL,
+		Metadata:       req.Metadata,
 	})
 	if err != nil {
-		return res.ErrorJSON(c, http.StatusBadRequest, "oauth_failed", err.Error(), requestIDFromCtx(c), nil)
+		return res.ErrorJSON(c, http.StatusBadRequest, "oauth_callback_failed", err.Error(), requestIDFromCtx(c), nil)
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"user": user, "tokens": tokens})
 }

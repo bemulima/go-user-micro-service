@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 
 	"github.com/example/user-service/config"
 	"github.com/example/user-service/internal/domain"
@@ -40,7 +41,7 @@ func (f *fakeUserRepo) FindByEmail(ctx context.Context, email string) (*domain.U
 	if user, ok := f.users[strings.ToLower(email)]; ok {
 		return user, nil
 	}
-	return nil, errors.New("not found")
+	return nil, gorm.ErrRecordNotFound
 }
 
 func (f *fakeUserRepo) FindByID(ctx context.Context, id string) (*domain.User, error) {
@@ -49,7 +50,7 @@ func (f *fakeUserRepo) FindByID(ctx context.Context, id string) (*domain.User, e
 			return user, nil
 		}
 	}
-	return nil, errors.New("not found")
+	return nil, gorm.ErrRecordNotFound
 }
 
 func (f *fakeUserRepo) Delete(ctx context.Context, id string) error { return nil }
@@ -81,6 +82,48 @@ func (f *fakeProfileRepo) FindByUserID(ctx context.Context, userID string) (*dom
 		return profile, nil
 	}
 	return nil, errors.New("not found")
+}
+
+type fakeProviderRepo struct {
+	providers map[string]*domain.UserProvider
+}
+
+func newFakeProviderRepo() *fakeProviderRepo {
+	return &fakeProviderRepo{providers: map[string]*domain.UserProvider{}}
+}
+
+func (f *fakeProviderRepo) key(providerType, providerUserID string) string {
+	return providerType + ":" + providerUserID
+}
+
+func (f *fakeProviderRepo) Create(ctx context.Context, provider *domain.UserProvider) error {
+	provider.ID = "provider-" + provider.ProviderUserID
+	f.providers[f.key(provider.ProviderType, provider.ProviderUserID)] = provider
+	return nil
+}
+
+func (f *fakeProviderRepo) Update(ctx context.Context, provider *domain.UserProvider) error {
+	f.providers[f.key(provider.ProviderType, provider.ProviderUserID)] = provider
+	return nil
+}
+
+func (f *fakeProviderRepo) Delete(ctx context.Context, id string) error { return nil }
+
+func (f *fakeProviderRepo) FindByProvider(ctx context.Context, providerType, providerUserID string) (*domain.UserProvider, error) {
+	if provider, ok := f.providers[f.key(providerType, providerUserID)]; ok {
+		return provider, nil
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
+func (f *fakeProviderRepo) FindByUserID(ctx context.Context, userID string) ([]domain.UserProvider, error) {
+	var result []domain.UserProvider
+	for _, provider := range f.providers {
+		if provider.UserID == userID {
+			result = append(result, *provider)
+		}
+	}
+	return result, nil
 }
 
 type fakeTarantool struct {
@@ -119,8 +162,9 @@ func TestAuthService_StartSignup(t *testing.T) {
 	require.NoError(t, err)
 	users := newFakeUserRepo()
 	profiles := newFakeProfileRepo()
+	providers := newFakeProviderRepo()
 	tarantoolClient := &fakeTarantool{}
-	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, tarantoolClient, fakePublisher{}, signer, nil)
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer)
 
 	uuid, err := auth.StartSignup(context.Background(), "trace-1", "user@example.com", "password123")
 	require.NoError(t, err)
@@ -133,8 +177,9 @@ func TestAuthService_VerifySignup(t *testing.T) {
 	require.NoError(t, err)
 	users := newFakeUserRepo()
 	profiles := newFakeProfileRepo()
+	providers := newFakeProviderRepo()
 	tarantoolClient := &fakeTarantool{email: "user@example.com", password: "password123"}
-	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, tarantoolClient, fakePublisher{}, signer, nil)
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer)
 
 	user, tokens, err := auth.VerifySignup(context.Background(), "trace-1", "uuid-1", "code")
 	require.NoError(t, err)
@@ -142,4 +187,86 @@ func TestAuthService_VerifySignup(t *testing.T) {
 	assert.NotNil(t, tokens)
 	assert.NotEmpty(t, tokens.AccessToken)
 	assert.NotNil(t, user.PasswordHash)
+}
+
+func TestAuthService_HandleOAuthCallback_CreateAndLink(t *testing.T) {
+	cfg := &config.Config{JWTSecret: "secret", JWTTTLMinutes: time.Minute, JWTRefreshTTLMinutes: time.Hour}
+	signer, err := service.NewJWTSigner(cfg)
+	require.NoError(t, err)
+	users := newFakeUserRepo()
+	profiles := newFakeProfileRepo()
+	providers := newFakeProviderRepo()
+	tarantoolClient := &fakeTarantool{}
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer)
+
+	displayName := "OAuth User"
+	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", service.OAuthUserInfo{
+		ProviderType:   "google",
+		ProviderUserID: "oauth-1",
+		Email:          "oauth@example.com",
+		DisplayName:    &displayName,
+		Metadata:       map[string]interface{}{"locale": "en"},
+	})
+
+	require.NoError(t, err)
+	assert.NotNil(t, user)
+	assert.NotNil(t, tokens)
+	assert.NotEmpty(t, tokens.AccessToken)
+
+	provider, err := providers.FindByProvider(context.Background(), "google", "oauth-1")
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, provider.UserID)
+}
+
+func TestAuthService_HandleOAuthCallback_ExistingProvider(t *testing.T) {
+	cfg := &config.Config{JWTSecret: "secret", JWTTTLMinutes: time.Minute, JWTRefreshTTLMinutes: time.Hour}
+	signer, err := service.NewJWTSigner(cfg)
+	require.NoError(t, err)
+
+	users := newFakeUserRepo()
+	existingUser := &domain.User{ID: "user-42", Email: "linked@example.com", IsActive: true}
+	users.users[strings.ToLower(existingUser.Email)] = existingUser
+
+	providers := newFakeProviderRepo()
+	providers.providers[providers.key("google", "oauth-1")] = &domain.UserProvider{ProviderType: "google", ProviderUserID: "oauth-1", UserID: existingUser.ID}
+
+	tarantoolClient := &fakeTarantool{}
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, fakePublisher{}, signer)
+
+	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", service.OAuthUserInfo{
+		ProviderType:   "google",
+		ProviderUserID: "oauth-1",
+		Email:          existingUser.Email,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, existingUser.ID, user.ID)
+	assert.NotNil(t, tokens)
+	assert.Equal(t, 1, len(providers.providers))
+}
+
+func TestAuthService_HandleOAuthCallback_InactiveUser(t *testing.T) {
+	cfg := &config.Config{JWTSecret: "secret", JWTTTLMinutes: time.Minute, JWTRefreshTTLMinutes: time.Hour}
+	signer, err := service.NewJWTSigner(cfg)
+	require.NoError(t, err)
+
+	users := newFakeUserRepo()
+	inactiveUser := &domain.User{ID: "user-99", Email: "inactive@example.com", IsActive: false}
+	users.users[strings.ToLower(inactiveUser.Email)] = inactiveUser
+
+	providers := newFakeProviderRepo()
+	providers.providers[providers.key("google", "inactive-1")] = &domain.UserProvider{ProviderType: "google", ProviderUserID: "inactive-1", UserID: inactiveUser.ID}
+
+	tarantoolClient := &fakeTarantool{}
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, fakePublisher{}, signer)
+
+	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", service.OAuthUserInfo{
+		ProviderType:   "google",
+		ProviderUserID: "inactive-1",
+		Email:          inactiveUser.Email,
+	})
+
+	assert.ErrorIs(t, err, service.ErrUserInactive)
+	assert.Nil(t, user)
+	assert.Nil(t, tokens)
 }
