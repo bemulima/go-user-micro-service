@@ -58,6 +58,7 @@ func (h *AuthHandler) RegisterRoutes(g *echo.Group) {
 	g.POST("/code-verification", h.Verify)
 	g.POST("/signin", h.SignIn)
 	g.POST("/oauth/callback", h.HandleOAuthCallback)
+	g.POST("/oauth/:provider/callback", h.OAuthCallback)
 }
 
 func (h *AuthHandler) Signup(c echo.Context) error {
@@ -97,7 +98,8 @@ func (h *AuthHandler) SignIn(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{"user": user, "tokens": tokens})
 }
 
-func (h *AuthHandler) HandleOAuthCallback(c echo.Context) error {
+func (h *AuthHandler) OAuthCallback(c echo.Context) error {
+	provider := c.Param("provider")
 	req := new(oauthCallbackRequest)
 	if err := c.Bind(req); err != nil {
 		return res.ErrorJSON(c, http.StatusBadRequest, "bad_request", "invalid payload", requestIDFromCtx(c), nil)

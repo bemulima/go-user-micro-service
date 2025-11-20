@@ -17,6 +17,7 @@ import (
 	"github.com/example/user-service/internal/ports/tarantool"
 	"github.com/example/user-service/internal/repo"
 	pkglog "github.com/example/user-service/pkg/log"
+	"gorm.io/gorm"
 )
 
 var (
@@ -28,7 +29,13 @@ type AuthService interface {
 	StartSignup(ctx context.Context, traceID, email, password string) (string, error)
 	VerifySignup(ctx context.Context, traceID, uuid, code string) (*domain.User, *Tokens, error)
 	SignIn(ctx context.Context, traceID, email, password string) (*domain.User, *Tokens, error)
-	HandleOAuthCallback(ctx context.Context, traceID string, info OAuthUserInfo) (*domain.User, *Tokens, error)
+	HandleOAuthCallback(ctx context.Context, traceID, provider string, info OAuthUserInfo) (*domain.User, *Tokens, error)
+}
+
+type OAuthUserInfo struct {
+	Email       string
+	DisplayName *string
+	AvatarURL   *string
 }
 
 type authService struct {
@@ -40,6 +47,7 @@ type authService struct {
 	tarantool tarantool.Client
 	publisher broker.Publisher
 	jwtSigner JWTSigner
+	avatars   AvatarIngestor
 }
 
 func NewAuthService(
@@ -51,6 +59,7 @@ func NewAuthService(
 	tarantool tarantool.Client,
 	publisher broker.Publisher,
 	jwtSigner JWTSigner,
+	avatars AvatarIngestor,
 ) AuthService {
 	return &authService{
 		cfg:       cfg,
@@ -61,6 +70,7 @@ func NewAuthService(
 		tarantool: tarantool,
 		publisher: publisher,
 		jwtSigner: jwtSigner,
+		avatars:   avatars,
 	}
 }
 
@@ -218,7 +228,8 @@ func (s *authService) HandleOAuthCallback(ctx context.Context, traceID string, i
 	if err != nil {
 		return nil, nil, err
 	}
-	s.logger.Info().Str("trace_id", traceID).Str("user_id", user.ID).Msg("oauth user created/linked")
+
+	s.logger.Info().Str("trace_id", traceID).Str("provider", provider).Str("user_id", user.ID).Msg("oauth callback processed")
 	return user, tokens, nil
 }
 
