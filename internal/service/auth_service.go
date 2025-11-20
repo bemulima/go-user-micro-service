@@ -160,6 +160,9 @@ func (s *authService) HandleOAuthCallback(ctx context.Context, traceID string, i
 		if err != nil {
 			return nil, nil, err
 		}
+		if !user.IsActive {
+			return nil, nil, ErrUserInactive
+		}
 		tokens, err := s.issueTokens(user)
 		if err != nil {
 			return nil, nil, err
@@ -188,6 +191,10 @@ func (s *authService) HandleOAuthCallback(ctx context.Context, traceID string, i
 		}
 	}
 
+	if !user.IsActive {
+		return nil, nil, ErrUserInactive
+	}
+
 	providerRecord := &domain.UserProvider{
 		ProviderType:   info.ProviderType,
 		ProviderUserID: info.ProviderUserID,
@@ -195,7 +202,16 @@ func (s *authService) HandleOAuthCallback(ctx context.Context, traceID string, i
 		Metadata:       info.Metadata,
 	}
 	if err := s.providers.Create(ctx, providerRecord); err != nil {
-		return nil, nil, err
+		if !errors.Is(err, gorm.ErrDuplicatedKey) {
+			return nil, nil, err
+		}
+
+		// Another request linked the provider concurrently; fetch the existing link.
+		existingProvider, findErr := s.providers.FindByProvider(ctx, info.ProviderType, info.ProviderUserID)
+		if findErr != nil {
+			return nil, nil, findErr
+		}
+		providerRecord = existingProvider
 	}
 
 	tokens, err := s.issueTokens(user)

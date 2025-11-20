@@ -217,3 +217,56 @@ func TestAuthService_HandleOAuthCallback_CreateAndLink(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, user.ID, provider.UserID)
 }
+
+func TestAuthService_HandleOAuthCallback_ExistingProvider(t *testing.T) {
+	cfg := &config.Config{JWTSecret: "secret", JWTTTLMinutes: time.Minute, JWTRefreshTTLMinutes: time.Hour}
+	signer, err := service.NewJWTSigner(cfg)
+	require.NoError(t, err)
+
+	users := newFakeUserRepo()
+	existingUser := &domain.User{ID: "user-42", Email: "linked@example.com", IsActive: true}
+	users.users[strings.ToLower(existingUser.Email)] = existingUser
+
+	providers := newFakeProviderRepo()
+	providers.providers[providers.key("google", "oauth-1")] = &domain.UserProvider{ProviderType: "google", ProviderUserID: "oauth-1", UserID: existingUser.ID}
+
+	tarantoolClient := &fakeTarantool{}
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, fakePublisher{}, signer)
+
+	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", service.OAuthUserInfo{
+		ProviderType:   "google",
+		ProviderUserID: "oauth-1",
+		Email:          existingUser.Email,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, existingUser.ID, user.ID)
+	assert.NotNil(t, tokens)
+	assert.Equal(t, 1, len(providers.providers))
+}
+
+func TestAuthService_HandleOAuthCallback_InactiveUser(t *testing.T) {
+	cfg := &config.Config{JWTSecret: "secret", JWTTTLMinutes: time.Minute, JWTRefreshTTLMinutes: time.Hour}
+	signer, err := service.NewJWTSigner(cfg)
+	require.NoError(t, err)
+
+	users := newFakeUserRepo()
+	inactiveUser := &domain.User{ID: "user-99", Email: "inactive@example.com", IsActive: false}
+	users.users[strings.ToLower(inactiveUser.Email)] = inactiveUser
+
+	providers := newFakeProviderRepo()
+	providers.providers[providers.key("google", "inactive-1")] = &domain.UserProvider{ProviderType: "google", ProviderUserID: "inactive-1", UserID: inactiveUser.ID}
+
+	tarantoolClient := &fakeTarantool{}
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, fakePublisher{}, signer)
+
+	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", service.OAuthUserInfo{
+		ProviderType:   "google",
+		ProviderUserID: "inactive-1",
+		Email:          inactiveUser.Email,
+	})
+
+	assert.ErrorIs(t, err, service.ErrUserInactive)
+	assert.Nil(t, user)
+	assert.Nil(t, tokens)
+}
