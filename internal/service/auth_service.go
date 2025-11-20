@@ -22,7 +22,6 @@ import (
 	"github.com/example/user-service/internal/ports/tarantool"
 	"github.com/example/user-service/internal/repo"
 	pkglog "github.com/example/user-service/pkg/log"
-	"gorm.io/gorm"
 )
 
 var (
@@ -35,12 +34,6 @@ type AuthService interface {
 	VerifySignup(ctx context.Context, traceID, uuid, code string) (*domain.User, *Tokens, error)
 	SignIn(ctx context.Context, traceID, email, password string) (*domain.User, *Tokens, error)
 	HandleOAuthCallback(ctx context.Context, traceID, provider string, info OAuthUserInfo) (*domain.User, *Tokens, error)
-}
-
-type OAuthUserInfo struct {
-	Email       string
-	DisplayName *string
-	AvatarURL   *string
 }
 
 type OAuthProvider string
@@ -168,17 +161,22 @@ func (s *authService) SignIn(ctx context.Context, traceID, email, password strin
 	return user, tokens, nil
 }
 
-func (s *authService) HandleOAuthCallback(ctx context.Context, traceID string, info OAuthUserInfo) (*domain.User, *Tokens, error) {
-	if info.ProviderType == "" || info.ProviderUserID == "" {
+func (s *authService) HandleOAuthCallback(ctx context.Context, traceID, provider string, info OAuthUserInfo) (*domain.User, *Tokens, error) {
+	providerType := strings.TrimSpace(provider)
+	if providerType == "" {
+		providerType = strings.TrimSpace(info.ProviderType)
+	}
+	if providerType == "" || info.ProviderUserID == "" {
 		return nil, nil, errors.New("provider information required")
 	}
 	if err := validateEmail(info.Email); err != nil {
 		return nil, nil, err
 	}
+	info.ProviderType = providerType
 
-	provider, err := s.providers.FindByProvider(ctx, info.ProviderType, info.ProviderUserID)
-	if err == nil && provider != nil {
-		user, err := s.users.FindByID(ctx, provider.UserID)
+	linkedProvider, err := s.providers.FindByProvider(ctx, providerType, info.ProviderUserID)
+	if err == nil && linkedProvider != nil {
+		user, err := s.users.FindByID(ctx, linkedProvider.UserID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -218,7 +216,7 @@ func (s *authService) HandleOAuthCallback(ctx context.Context, traceID string, i
 	}
 
 	providerRecord := &domain.UserProvider{
-		ProviderType:   info.ProviderType,
+		ProviderType:   providerType,
 		ProviderUserID: info.ProviderUserID,
 		UserID:         user.ID,
 		Metadata:       info.Metadata,
@@ -229,7 +227,7 @@ func (s *authService) HandleOAuthCallback(ctx context.Context, traceID string, i
 		}
 
 		// Another request linked the provider concurrently; fetch the existing link.
-		existingProvider, findErr := s.providers.FindByProvider(ctx, info.ProviderType, info.ProviderUserID)
+		existingProvider, findErr := s.providers.FindByProvider(ctx, providerType, info.ProviderUserID)
 		if findErr != nil {
 			return nil, nil, findErr
 		}
@@ -241,7 +239,7 @@ func (s *authService) HandleOAuthCallback(ctx context.Context, traceID string, i
 		return nil, nil, err
 	}
 
-	s.logger.Info().Str("trace_id", traceID).Str("provider", provider).Str("user_id", user.ID).Msg("oauth callback processed")
+	s.logger.Info().Str("trace_id", traceID).Str("provider", providerType).Str("user_id", user.ID).Msg("oauth callback processed")
 	return user, tokens, nil
 }
 

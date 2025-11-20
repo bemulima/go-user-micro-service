@@ -200,7 +200,7 @@ func TestAuthService_HandleOAuthCallback_CreateAndLink(t *testing.T) {
 	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer)
 
 	displayName := "OAuth User"
-	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", service.OAuthUserInfo{
+	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", "google", service.OAuthUserInfo{
 		ProviderType:   "google",
 		ProviderUserID: "oauth-1",
 		Email:          "oauth@example.com",
@@ -233,7 +233,7 @@ func TestAuthService_HandleOAuthCallback_ExistingProvider(t *testing.T) {
 	tarantoolClient := &fakeTarantool{}
 	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, fakePublisher{}, signer)
 
-	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", service.OAuthUserInfo{
+	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", "google", service.OAuthUserInfo{
 		ProviderType:   "google",
 		ProviderUserID: "oauth-1",
 		Email:          existingUser.Email,
@@ -260,7 +260,7 @@ func TestAuthService_HandleOAuthCallback_InactiveUser(t *testing.T) {
 	tarantoolClient := &fakeTarantool{}
 	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, fakePublisher{}, signer)
 
-	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", service.OAuthUserInfo{
+	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", "google", service.OAuthUserInfo{
 		ProviderType:   "google",
 		ProviderUserID: "inactive-1",
 		Email:          inactiveUser.Email,

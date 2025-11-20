@@ -17,6 +17,7 @@ import (
 )
 
 type authServiceStub struct {
+	lastProvider  string
 	lastOAuthInfo *service.OAuthUserInfo
 }
 
@@ -32,7 +33,8 @@ func (authServiceStub) SignIn(ctx context.Context, traceID, email, password stri
 	return &domain.User{ID: "user-1", Email: "user@example.com"}, &service.Tokens{AccessToken: "token"}, nil
 }
 
-func (s *authServiceStub) HandleOAuthCallback(ctx context.Context, traceID string, info service.OAuthUserInfo) (*domain.User, *service.Tokens, error) {
+func (s *authServiceStub) HandleOAuthCallback(ctx context.Context, traceID, provider string, info service.OAuthUserInfo) (*domain.User, *service.Tokens, error) {
+	s.lastProvider = provider
 	s.lastOAuthInfo = &info
 	return &domain.User{ID: "user-1", Email: "user@example.com"}, &service.Tokens{AccessToken: "token"}, nil
 }
@@ -75,6 +77,7 @@ func TestAuthHandlerOAuthCallback(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "google", stub.lastProvider)
 	assert.NotNil(t, stub.lastOAuthInfo)
 	assert.Equal(t, "google", stub.lastOAuthInfo.ProviderType)
 	assert.Equal(t, "abc123", stub.lastOAuthInfo.ProviderUserID)

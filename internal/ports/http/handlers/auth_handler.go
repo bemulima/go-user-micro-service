@@ -98,20 +98,37 @@ func (h *AuthHandler) SignIn(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{"user": user, "tokens": tokens})
 }
 
+func (h *AuthHandler) HandleOAuthCallback(c echo.Context) error {
+	return h.processOAuthCallback(c, "")
+}
+
 func (h *AuthHandler) OAuthCallback(c echo.Context) error {
 	provider := c.Param("provider")
+	return h.processOAuthCallback(c, provider)
+}
+
+func (h *AuthHandler) processOAuthCallback(c echo.Context, provider string) error {
 	req := new(oauthCallbackRequest)
 	if err := c.Bind(req); err != nil {
 		return res.ErrorJSON(c, http.StatusBadRequest, "bad_request", "invalid payload", requestIDFromCtx(c), nil)
 	}
-	user, tokens, err := h.auth.HandleOAuthCallback(c.Request().Context(), requestIDFromCtx(c), service.OAuthUserInfo{
-		ProviderType:   req.ProviderType,
-		ProviderUserID: req.ProviderUserID,
-		Email:          req.Email,
-		DisplayName:    req.DisplayName,
-		AvatarURL:      req.AvatarURL,
-		Metadata:       req.Metadata,
-	})
+	effectiveProvider := provider
+	if effectiveProvider == "" {
+		effectiveProvider = req.ProviderType
+	}
+	user, tokens, err := h.auth.HandleOAuthCallback(
+		c.Request().Context(),
+		requestIDFromCtx(c),
+		effectiveProvider,
+		service.OAuthUserInfo{
+			ProviderType:   effectiveProvider,
+			ProviderUserID: req.ProviderUserID,
+			Email:          req.Email,
+			DisplayName:    req.DisplayName,
+			AvatarURL:      req.AvatarURL,
+			Metadata:       req.Metadata,
+		},
+	)
 	if err != nil {
 		return res.ErrorJSON(c, http.StatusBadRequest, "oauth_callback_failed", err.Error(), requestIDFromCtx(c), nil)
 	}
