@@ -60,6 +60,7 @@ func New(ctx context.Context) (*App, error) {
 
 	userRepo := repo.NewUserRepository(db)
 	profileRepo := repo.NewUserProfileRepository(db)
+	identityRepo := repo.NewUserIdentityRepository(db)
 	signer, err := service.NewJWTSigner(cfg)
 	if err != nil {
 		return nil, err
