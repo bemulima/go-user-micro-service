@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 
 	"github.com/example/user-service/config"
 	"github.com/example/user-service/internal/domain"
@@ -27,6 +28,7 @@ type AuthService interface {
 	StartSignup(ctx context.Context, traceID, email, password string) (string, error)
 	VerifySignup(ctx context.Context, traceID, uuid, code string) (*domain.User, *Tokens, error)
 	SignIn(ctx context.Context, traceID, email, password string) (*domain.User, *Tokens, error)
+	HandleOAuthCallback(ctx context.Context, traceID string, info OAuthUserInfo) (*domain.User, *Tokens, error)
 }
 
 type authService struct {
@@ -34,6 +36,7 @@ type authService struct {
 	logger    pkglog.Logger
 	users     repo.UserRepository
 	profiles  repo.UserProfileRepository
+	providers repo.UserProviderRepository
 	tarantool tarantool.Client
 	publisher broker.Publisher
 	jwtSigner JWTSigner
@@ -44,6 +47,7 @@ func NewAuthService(
 	logger pkglog.Logger,
 	users repo.UserRepository,
 	profiles repo.UserProfileRepository,
+	providers repo.UserProviderRepository,
 	tarantool tarantool.Client,
 	publisher broker.Publisher,
 	jwtSigner JWTSigner,
@@ -53,10 +57,20 @@ func NewAuthService(
 		logger:    logger,
 		users:     users,
 		profiles:  profiles,
+		providers: providers,
 		tarantool: tarantool,
 		publisher: publisher,
 		jwtSigner: jwtSigner,
 	}
+}
+
+type OAuthUserInfo struct {
+	ProviderType   string
+	ProviderUserID string
+	Email          string
+	DisplayName    *string
+	AvatarURL      *string
+	Metadata       map[string]interface{}
 }
 
 func (s *authService) StartSignup(ctx context.Context, traceID, email, password string) (string, error) {
@@ -129,6 +143,66 @@ func (s *authService) SignIn(ctx context.Context, traceID, email, password strin
 		return nil, nil, err
 	}
 	s.logger.Info().Str("trace_id", traceID).Str("user_id", user.ID).Msg("user signed in")
+	return user, tokens, nil
+}
+
+func (s *authService) HandleOAuthCallback(ctx context.Context, traceID string, info OAuthUserInfo) (*domain.User, *Tokens, error) {
+	if info.ProviderType == "" || info.ProviderUserID == "" {
+		return nil, nil, errors.New("provider information required")
+	}
+	if err := validateEmail(info.Email); err != nil {
+		return nil, nil, err
+	}
+
+	provider, err := s.providers.FindByProvider(ctx, info.ProviderType, info.ProviderUserID)
+	if err == nil && provider != nil {
+		user, err := s.users.FindByID(ctx, provider.UserID)
+		if err != nil {
+			return nil, nil, err
+		}
+		tokens, err := s.issueTokens(user)
+		if err != nil {
+			return nil, nil, err
+		}
+		s.logger.Info().Str("trace_id", traceID).Str("user_id", user.ID).Msg("oauth user found")
+		return user, tokens, nil
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil, err
+	}
+
+	normalizedEmail := strings.ToLower(info.Email)
+	user, err := s.users.FindByEmail(ctx, normalizedEmail)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil, err
+	}
+
+	if user == nil {
+		user = &domain.User{Email: normalizedEmail, IsActive: true}
+		if err := s.users.Create(ctx, user); err != nil {
+			return nil, nil, err
+		}
+		profile := &domain.UserProfile{UserID: user.ID, DisplayName: info.DisplayName, AvatarURL: info.AvatarURL}
+		if err := s.profiles.Create(ctx, profile); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	providerRecord := &domain.UserProvider{
+		ProviderType:   info.ProviderType,
+		ProviderUserID: info.ProviderUserID,
+		UserID:         user.ID,
+		Metadata:       info.Metadata,
+	}
+	if err := s.providers.Create(ctx, providerRecord); err != nil {
+		return nil, nil, err
+	}
+
+	tokens, err := s.issueTokens(user)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.logger.Info().Str("trace_id", traceID).Str("user_id", user.ID).Msg("oauth user created/linked")
 	return user, tokens, nil
 }
 
