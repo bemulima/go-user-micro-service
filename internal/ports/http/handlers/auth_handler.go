@@ -48,6 +48,8 @@ func (h *AuthHandler) RegisterRoutes(g *echo.Group) {
 	g.POST("/signup", h.Signup)
 	g.POST("/code-verification", h.Verify)
 	g.POST("/signin", h.SignIn)
+	g.GET("/oauth/:provider/initiate", h.InitiateOAuth)
+	g.GET("/oauth/:provider/callback", h.OAuthCallback)
 }
 
 func (h *AuthHandler) Signup(c echo.Context) error {
@@ -83,6 +85,29 @@ func (h *AuthHandler) SignIn(c echo.Context) error {
 	if err != nil {
 		status := http.StatusUnauthorized
 		return res.ErrorJSON(c, status, "signin_failed", err.Error(), requestIDFromCtx(c), nil)
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{"user": user, "tokens": tokens})
+}
+
+func (h *AuthHandler) InitiateOAuth(c echo.Context) error {
+	provider := service.OAuthProvider(c.Param("provider"))
+	state := c.QueryParam("state")
+	url, err := h.auth.StartOAuth(c.Request().Context(), requestIDFromCtx(c), provider, state)
+	if err != nil {
+		return res.ErrorJSON(c, http.StatusBadRequest, "oauth_init_failed", err.Error(), requestIDFromCtx(c), nil)
+	}
+	return res.JSON(c, http.StatusOK, map[string]string{"url": url})
+}
+
+func (h *AuthHandler) OAuthCallback(c echo.Context) error {
+	provider := service.OAuthProvider(c.Param("provider"))
+	code := c.QueryParam("code")
+	if code == "" {
+		return res.ErrorJSON(c, http.StatusBadRequest, "bad_request", "missing code", requestIDFromCtx(c), nil)
+	}
+	user, tokens, err := h.auth.HandleOAuthCallback(c.Request().Context(), requestIDFromCtx(c), provider, code)
+	if err != nil {
+		return res.ErrorJSON(c, http.StatusBadRequest, "oauth_callback_failed", err.Error(), requestIDFromCtx(c), nil)
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"user": user, "tokens": tokens})
 }
