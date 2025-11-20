@@ -22,6 +22,7 @@ import (
 	"github.com/example/user-service/internal/ports/tarantool"
 	"github.com/example/user-service/internal/repo"
 	pkglog "github.com/example/user-service/pkg/log"
+	"gorm.io/gorm"
 )
 
 var (
@@ -33,8 +34,13 @@ type AuthService interface {
 	StartSignup(ctx context.Context, traceID, email, password string) (string, error)
 	VerifySignup(ctx context.Context, traceID, uuid, code string) (*domain.User, *Tokens, error)
 	SignIn(ctx context.Context, traceID, email, password string) (*domain.User, *Tokens, error)
-	StartOAuth(ctx context.Context, traceID string, provider OAuthProvider, state string) (string, error)
-	HandleOAuthCallback(ctx context.Context, traceID string, provider OAuthProvider, code string) (*domain.User, *Tokens, error)
+	HandleOAuthCallback(ctx context.Context, traceID, provider string, info OAuthUserInfo) (*domain.User, *Tokens, error)
+}
+
+type OAuthUserInfo struct {
+	Email       string
+	DisplayName *string
+	AvatarURL   *string
 }
 
 type OAuthProvider string
@@ -45,14 +51,15 @@ const (
 )
 
 type authService struct {
-	cfg        *config.Config
-	logger     pkglog.Logger
-	users      repo.UserRepository
-	profiles   repo.UserProfileRepository
-	tarantool  tarantool.Client
-	publisher  broker.Publisher
-	jwtSigner  JWTSigner
-	httpClient *http.Client
+	cfg       *config.Config
+	logger    pkglog.Logger
+	users     repo.UserRepository
+	profiles  repo.UserProfileRepository
+	providers repo.UserProviderRepository
+	tarantool tarantool.Client
+	publisher broker.Publisher
+	jwtSigner JWTSigner
+	avatars   AvatarIngestor
 }
 
 func NewAuthService(
@@ -60,20 +67,32 @@ func NewAuthService(
 	logger pkglog.Logger,
 	users repo.UserRepository,
 	profiles repo.UserProfileRepository,
+	providers repo.UserProviderRepository,
 	tarantool tarantool.Client,
 	publisher broker.Publisher,
 	jwtSigner JWTSigner,
+	avatars AvatarIngestor,
 ) AuthService {
 	return &authService{
-		cfg:        cfg,
-		logger:     logger,
-		users:      users,
-		profiles:   profiles,
-		tarantool:  tarantool,
-		publisher:  publisher,
-		jwtSigner:  jwtSigner,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		cfg:       cfg,
+		logger:    logger,
+		users:     users,
+		profiles:  profiles,
+		providers: providers,
+		tarantool: tarantool,
+		publisher: publisher,
+		jwtSigner: jwtSigner,
+		avatars:   avatars,
 	}
+}
+
+type OAuthUserInfo struct {
+	ProviderType   string
+	ProviderUserID string
+	Email          string
+	DisplayName    *string
+	AvatarURL      *string
+	Metadata       map[string]interface{}
 }
 
 func (s *authService) StartSignup(ctx context.Context, traceID, email, password string) (string, error) {
@@ -149,60 +168,81 @@ func (s *authService) SignIn(ctx context.Context, traceID, email, password strin
 	return user, tokens, nil
 }
 
-func (s *authService) StartOAuth(ctx context.Context, traceID string, provider OAuthProvider, state string) (string, error) {
-	if state == "" {
-		state = traceID
+func (s *authService) HandleOAuthCallback(ctx context.Context, traceID string, info OAuthUserInfo) (*domain.User, *Tokens, error) {
+	if info.ProviderType == "" || info.ProviderUserID == "" {
+		return nil, nil, errors.New("provider information required")
 	}
-
-	switch provider {
-	case ProviderGoogle:
-		return s.googleAuthURL(state)
-	case ProviderGithub:
-		return s.githubAuthURL(state)
-	default:
-		return "", fmt.Errorf("unsupported provider")
-	}
-}
-
-func (s *authService) HandleOAuthCallback(ctx context.Context, traceID string, provider OAuthProvider, code string) (*domain.User, *Tokens, error) {
-	var profile *oauthProfile
-	var err error
-
-	switch provider {
-	case ProviderGoogle:
-		profile, err = s.handleGoogleCallback(ctx, code)
-	case ProviderGithub:
-		profile, err = s.handleGithubCallback(ctx, code)
-	default:
-		err = fmt.Errorf("unsupported provider")
-	}
-
-	if err != nil {
+	if err := validateEmail(info.Email); err != nil {
 		return nil, nil, err
 	}
-	if profile == nil || profile.Email == "" {
-		return nil, nil, errors.New("unable to retrieve user profile")
+
+	provider, err := s.providers.FindByProvider(ctx, info.ProviderType, info.ProviderUserID)
+	if err == nil && provider != nil {
+		user, err := s.users.FindByID(ctx, provider.UserID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !user.IsActive {
+			return nil, nil, ErrUserInactive
+		}
+		tokens, err := s.issueTokens(user)
+		if err != nil {
+			return nil, nil, err
+		}
+		s.logger.Info().Str("trace_id", traceID).Str("user_id", user.ID).Msg("oauth user found")
+		return user, tokens, nil
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil, err
 	}
 
-	user, err := s.upsertOAuthUser(ctx, profile)
-	if err != nil {
+	normalizedEmail := strings.ToLower(info.Email)
+	user, err := s.users.FindByEmail(ctx, normalizedEmail)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil, err
+	}
+
+	if user == nil {
+		user = &domain.User{Email: normalizedEmail, IsActive: true}
+		if err := s.users.Create(ctx, user); err != nil {
+			return nil, nil, err
+		}
+		profile := &domain.UserProfile{UserID: user.ID, DisplayName: info.DisplayName, AvatarURL: info.AvatarURL}
+		if err := s.profiles.Create(ctx, profile); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if !user.IsActive {
+		return nil, nil, ErrUserInactive
+	}
+
+	providerRecord := &domain.UserProvider{
+		ProviderType:   info.ProviderType,
+		ProviderUserID: info.ProviderUserID,
+		UserID:         user.ID,
+		Metadata:       info.Metadata,
+	}
+	if err := s.providers.Create(ctx, providerRecord); err != nil {
+		if !errors.Is(err, gorm.ErrDuplicatedKey) {
+			return nil, nil, err
+		}
+
+		// Another request linked the provider concurrently; fetch the existing link.
+		existingProvider, findErr := s.providers.FindByProvider(ctx, info.ProviderType, info.ProviderUserID)
+		if findErr != nil {
+			return nil, nil, findErr
+		}
+		providerRecord = existingProvider
 	}
 
 	tokens, err := s.issueTokens(user)
 	if err != nil {
 		return nil, nil, err
 	}
-	s.logger.Info().Str("trace_id", traceID).Str("user_id", user.ID).Str("provider", string(provider)).Msg("user authenticated via oauth")
-	return user, tokens, nil
-}
 
-type oauthProfile struct {
-	Email       string
-	FirstName   string
-	LastName    string
-	DisplayName string
-	AvatarURL   string
+	s.logger.Info().Str("trace_id", traceID).Str("provider", provider).Str("user_id", user.ID).Msg("oauth callback processed")
+	return user, tokens, nil
 }
 
 func (s *authService) issueTokens(user *domain.User) (*Tokens, error) {

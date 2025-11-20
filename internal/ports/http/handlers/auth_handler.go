@@ -44,12 +44,21 @@ type oauthCallbackResponse struct {
 	Tokens *service.Tokens `json:"tokens"`
 }
 
+type oauthCallbackRequest struct {
+	ProviderType   string                 `json:"provider_type"`
+	ProviderUserID string                 `json:"provider_user_id"`
+	Email          string                 `json:"email"`
+	DisplayName    *string                `json:"display_name"`
+	AvatarURL      *string                `json:"avatar_url"`
+	Metadata       map[string]interface{} `json:"metadata"`
+}
+
 func (h *AuthHandler) RegisterRoutes(g *echo.Group) {
 	g.POST("/signup", h.Signup)
 	g.POST("/code-verification", h.Verify)
 	g.POST("/signin", h.SignIn)
-	g.GET("/oauth/:provider/initiate", h.InitiateOAuth)
-	g.GET("/oauth/:provider/callback", h.OAuthCallback)
+	g.POST("/oauth/callback", h.HandleOAuthCallback)
+	g.POST("/oauth/:provider/callback", h.OAuthCallback)
 }
 
 func (h *AuthHandler) Signup(c echo.Context) error {
@@ -89,23 +98,20 @@ func (h *AuthHandler) SignIn(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{"user": user, "tokens": tokens})
 }
 
-func (h *AuthHandler) InitiateOAuth(c echo.Context) error {
-	provider := service.OAuthProvider(c.Param("provider"))
-	state := c.QueryParam("state")
-	url, err := h.auth.StartOAuth(c.Request().Context(), requestIDFromCtx(c), provider, state)
-	if err != nil {
-		return res.ErrorJSON(c, http.StatusBadRequest, "oauth_init_failed", err.Error(), requestIDFromCtx(c), nil)
-	}
-	return res.JSON(c, http.StatusOK, map[string]string{"url": url})
-}
-
 func (h *AuthHandler) OAuthCallback(c echo.Context) error {
-	provider := service.OAuthProvider(c.Param("provider"))
-	code := c.QueryParam("code")
-	if code == "" {
-		return res.ErrorJSON(c, http.StatusBadRequest, "bad_request", "missing code", requestIDFromCtx(c), nil)
+	provider := c.Param("provider")
+	req := new(oauthCallbackRequest)
+	if err := c.Bind(req); err != nil {
+		return res.ErrorJSON(c, http.StatusBadRequest, "bad_request", "invalid payload", requestIDFromCtx(c), nil)
 	}
-	user, tokens, err := h.auth.HandleOAuthCallback(c.Request().Context(), requestIDFromCtx(c), provider, code)
+	user, tokens, err := h.auth.HandleOAuthCallback(c.Request().Context(), requestIDFromCtx(c), service.OAuthUserInfo{
+		ProviderType:   req.ProviderType,
+		ProviderUserID: req.ProviderUserID,
+		Email:          req.Email,
+		DisplayName:    req.DisplayName,
+		AvatarURL:      req.AvatarURL,
+		Metadata:       req.Metadata,
+	})
 	if err != nil {
 		return res.ErrorJSON(c, http.StatusBadRequest, "oauth_callback_failed", err.Error(), requestIDFromCtx(c), nil)
 	}
