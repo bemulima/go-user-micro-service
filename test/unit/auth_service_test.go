@@ -156,6 +156,12 @@ func (fakePublisher) Publish(ctx context.Context, routingKey string, payload int
 }
 func (fakePublisher) Close() error { return nil }
 
+type fakeAvatarIngestor struct{}
+
+func (fakeAvatarIngestor) Ingest(ctx context.Context, traceID, avatarURL string) (string, error) {
+	return avatarURL, nil
+}
+
 func TestAuthService_StartSignup(t *testing.T) {
 	cfg := &config.Config{JWTSecret: "secret", JWTTTLMinutes: time.Minute, JWTRefreshTTLMinutes: time.Hour}
 	signer, err := service.NewJWTSigner(cfg)
@@ -164,7 +170,7 @@ func TestAuthService_StartSignup(t *testing.T) {
 	profiles := newFakeProfileRepo()
 	providers := newFakeProviderRepo()
 	tarantoolClient := &fakeTarantool{}
-	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer)
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer, fakeAvatarIngestor{})
 
 	uuid, err := auth.StartSignup(context.Background(), "trace-1", "user@example.com", "password123")
 	require.NoError(t, err)
@@ -179,7 +185,7 @@ func TestAuthService_VerifySignup(t *testing.T) {
 	profiles := newFakeProfileRepo()
 	providers := newFakeProviderRepo()
 	tarantoolClient := &fakeTarantool{email: "user@example.com", password: "password123"}
-	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer)
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer, fakeAvatarIngestor{})
 
 	user, tokens, err := auth.VerifySignup(context.Background(), "trace-1", "uuid-1", "code")
 	require.NoError(t, err)
@@ -197,7 +203,7 @@ func TestAuthService_HandleOAuthCallback_CreateAndLink(t *testing.T) {
 	profiles := newFakeProfileRepo()
 	providers := newFakeProviderRepo()
 	tarantoolClient := &fakeTarantool{}
-	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer)
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer, fakeAvatarIngestor{})
 
 	displayName := "OAuth User"
 	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", "google", service.OAuthUserInfo{
@@ -231,7 +237,7 @@ func TestAuthService_HandleOAuthCallback_ExistingProvider(t *testing.T) {
 	providers.providers[providers.key("google", "oauth-1")] = &domain.UserProvider{ProviderType: "google", ProviderUserID: "oauth-1", UserID: existingUser.ID}
 
 	tarantoolClient := &fakeTarantool{}
-	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, fakePublisher{}, signer)
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, fakePublisher{}, signer, fakeAvatarIngestor{})
 
 	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", "google", service.OAuthUserInfo{
 		ProviderType:   "google",
@@ -258,7 +264,7 @@ func TestAuthService_HandleOAuthCallback_InactiveUser(t *testing.T) {
 	providers.providers[providers.key("google", "inactive-1")] = &domain.UserProvider{ProviderType: "google", ProviderUserID: "inactive-1", UserID: inactiveUser.ID}
 
 	tarantoolClient := &fakeTarantool{}
-	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, fakePublisher{}, signer)
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, fakePublisher{}, signer, fakeAvatarIngestor{})
 
 	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", "google", service.OAuthUserInfo{
 		ProviderType:   "google",

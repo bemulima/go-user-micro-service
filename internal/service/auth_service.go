@@ -10,7 +10,6 @@ import (
 	"net/mail"
 	"net/url"
 	"strings"
-	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -53,6 +52,7 @@ type authService struct {
 	publisher broker.Publisher
 	jwtSigner JWTSigner
 	avatars   AvatarIngestor
+	httpClient *http.Client
 }
 
 func NewAuthService(
@@ -67,15 +67,16 @@ func NewAuthService(
 	avatars AvatarIngestor,
 ) AuthService {
 	return &authService{
-		cfg:       cfg,
-		logger:    logger,
-		users:     users,
-		profiles:  profiles,
-		providers: providers,
-		tarantool: tarantool,
-		publisher: publisher,
-		jwtSigner: jwtSigner,
-		avatars:   avatars,
+		cfg:        cfg,
+		logger:     logger,
+		users:      users,
+		profiles:   profiles,
+		providers:  providers,
+		tarantool:  tarantool,
+		publisher:  publisher,
+		jwtSigner:  jwtSigner,
+		avatars:    avatars,
+		httpClient: http.DefaultClient,
 	}
 }
 
@@ -86,6 +87,14 @@ type OAuthUserInfo struct {
 	DisplayName    *string
 	AvatarURL      *string
 	Metadata       map[string]interface{}
+}
+
+type oauthProfile struct {
+	Email       string
+	FirstName   string
+	LastName    string
+	DisplayName string
+	AvatarURL   string
 }
 
 func (s *authService) StartSignup(ctx context.Context, traceID, email, password string) (string, error) {

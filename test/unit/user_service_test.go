@@ -60,6 +60,17 @@ func (p *profileRepoStub) FindByUserID(ctx context.Context, userID string) (*dom
 	return nil, errors.New("not found")
 }
 
+type identityRepoStub struct{}
+
+func (identityRepoStub) Create(ctx context.Context, identity *domain.UserIdentity) error { return nil }
+func (identityRepoStub) FindByProviderUserID(ctx context.Context, provider domain.IdentityProvider, providerUserID string) (*domain.UserIdentity, error) {
+	return nil, errors.New("not found")
+}
+func (identityRepoStub) FindByUserAndProvider(ctx context.Context, userID string, provider domain.IdentityProvider) (*domain.UserIdentity, error) {
+	return nil, errors.New("not found")
+}
+func (identityRepoStub) Delete(ctx context.Context, identity *domain.UserIdentity) error { return nil }
+
 type tarantoolStub struct{}
 
 func (tarantoolStub) StartRegistration(ctx context.Context, email, password string) (string, error) {
@@ -78,7 +89,7 @@ func (tarantoolStub) VerifyEmailChange(ctx context.Context, uuid, code string) (
 func TestUserService_UpdateProfile(t *testing.T) {
 	users := newUserRepoStub()
 	profiles := newProfileRepoStub()
-	svc := service.NewUserService(users, profiles, tarantoolStub{})
+	svc := service.NewUserService(users, profiles, identityRepoStub{}, tarantoolStub{})
 	display := "New Name"
 	avatar := "http://avatar"
 
@@ -91,7 +102,7 @@ func TestUserService_UpdateProfile(t *testing.T) {
 func TestUserService_VerifyEmailChange(t *testing.T) {
 	users := newUserRepoStub()
 	profiles := newProfileRepoStub()
-	svc := service.NewUserService(users, profiles, tarantoolStub{})
+	svc := service.NewUserService(users, profiles, identityRepoStub{}, tarantoolStub{})
 
 	user, err := svc.VerifyEmailChange(context.Background(), "user-1", "uuid", "code")
 	require.NoError(t, err)
