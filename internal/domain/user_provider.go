@@ -38,13 +38,18 @@ func (m *JSONMap) Scan(value interface{}) error {
 		return nil
 	}
 
-	s, ok := value.(string)
-	if !ok {
+	var bytes []byte
+	switch v := value.(type) {
+	case string:
+		bytes = []byte(v)
+	case []byte:
+		bytes = v
+	default:
 		return fmt.Errorf("unsupported type %T for JSONMap", value)
 	}
 
 	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(s), &data); err != nil {
+	if err := json.Unmarshal(bytes, &data); err != nil {
 		return err
 	}
 	*m = data
