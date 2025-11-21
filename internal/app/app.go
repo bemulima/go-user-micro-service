@@ -54,7 +54,6 @@ func New(ctx context.Context) (*App, error) {
 	rbacClient := rbacclient.NewCachingClient(rbacHTTP, time.Minute)
 
 	var publisher broker.Publisher
-	var err error
 	switch cfg.MessageBroker {
 	case "nats":
 		publisher, err = broker.NewNATSPublisher(cfg.NATSURL)
