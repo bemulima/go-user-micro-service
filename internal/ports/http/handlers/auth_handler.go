@@ -82,6 +82,10 @@ func (h *AuthHandler) Verify(c echo.Context) error {
 	if err != nil {
 		return res.ErrorJSON(c, http.StatusBadRequest, "verification_failed", err.Error(), requestIDFromCtx(c), nil)
 	}
+	if tokens != nil {
+		c.Response().Header().Set(echo.HeaderAuthorization, "Bearer "+tokens.AccessToken)
+		c.Response().Header().Set("refresh_token", tokens.RefreshToken)
+	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"user": user, "tokens": tokens})
 }
 

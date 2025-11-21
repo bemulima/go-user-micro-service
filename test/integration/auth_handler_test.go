@@ -26,7 +26,7 @@ func (authServiceStub) StartSignup(ctx context.Context, traceID, email, password
 }
 
 func (authServiceStub) VerifySignup(ctx context.Context, traceID, uuid, code string) (*domain.User, *service.Tokens, error) {
-	return &domain.User{ID: "user-1", Email: "user@example.com"}, &service.Tokens{AccessToken: "token"}, nil
+	return &domain.User{ID: "user-1", Email: "user@example.com"}, &service.Tokens{AccessToken: "token", RefreshToken: "refresh"}, nil
 }
 
 func (authServiceStub) SignIn(ctx context.Context, traceID, email, password string) (*domain.User, *service.Tokens, error) {
@@ -52,6 +52,24 @@ func TestAuthHandlerSignup(t *testing.T) {
 	err := handler.Signup(c)
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusAccepted, rec.Code)
+}
+
+func TestAuthHandlerVerify(t *testing.T) {
+	e := echo.New()
+	handler := handlers.NewAuthHandler(&authServiceStub{})
+
+	reqBody, _ := json.Marshal(map[string]string{"uuid": "uuid-1", "code": "0000"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/code-verification", bytes.NewReader(reqBody))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler.Verify(c)
+
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "Bearer token", rec.Header().Get(echo.HeaderAuthorization))
+	assert.Equal(t, "refresh", rec.Header().Get("refresh_token"))
 }
 
 func TestAuthHandlerOAuthCallback(t *testing.T) {

@@ -1,6 +1,7 @@
 package rbac
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ type Client interface {
 	GetPermissionsByUserID(ctx context.Context, userID string) ([]string, error)
 	CheckPermission(ctx context.Context, userID, permission string) (bool, error)
 	CheckRole(ctx context.Context, userID, role string) (bool, error)
+	AssignRole(ctx context.Context, userID, role string) error
 }
 
 type httpClient struct {
@@ -84,6 +86,16 @@ func (c *httpClient) CheckRole(ctx context.Context, userID, role string) (bool, 
 	return resp.Allowed, nil
 }
 
+func (c *httpClient) AssignRole(ctx context.Context, userID, role string) error {
+	payload := map[string]interface{}{
+		"value": map[string]string{
+			"user_id": userID,
+			"role":    role,
+		},
+	}
+	return c.post(ctx, "/assign_role", payload)
+}
+
 func (c *httpClient) get(ctx context.Context, path string, params url.Values, out interface{}) error {
 	op := func() error {
 		endpoint := fmt.Sprintf("%s%s?%s", c.baseURL, path, params.Encode())
@@ -101,6 +113,35 @@ func (c *httpClient) get(ctx context.Context, path string, params url.Values, ou
 		}
 		if err := json.NewDecoder(res.Body).Decode(out); err != nil {
 			return backoff.Permanent(err)
+		}
+		return nil
+	}
+
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 200 * time.Millisecond
+	bo.MaxElapsedTime = 3 * time.Second
+
+	return backoff.Retry(op, backoff.WithContext(bo, ctx))
+}
+
+func (c *httpClient) post(ctx context.Context, path string, payload interface{}) error {
+	op := func() error {
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return backoff.Permanent(err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s%s", c.baseURL, path), bytes.NewReader(body))
+		if err != nil {
+			return backoff.Permanent(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		res, err := c.client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer res.Body.Close()
+		if res.StatusCode >= 400 {
+			return fmt.Errorf("rbac error: status %d", res.StatusCode)
 		}
 		return nil
 	}
@@ -177,4 +218,8 @@ func (c *cachingClient) CheckRole(ctx context.Context, userID, role string) (boo
 		return false, err
 	}
 	return value.(bool), nil
+}
+
+func (c *cachingClient) AssignRole(ctx context.Context, userID, role string) error {
+	return c.delegate.AssignRole(ctx, userID, role)
 }

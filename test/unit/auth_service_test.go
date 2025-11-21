@@ -126,6 +126,44 @@ func (f *fakeProviderRepo) FindByUserID(ctx context.Context, userID string) ([]d
 	return result, nil
 }
 
+type fakeRBACClient struct {
+	assignments map[string]string
+}
+
+func newFakeRBACClient() *fakeRBACClient {
+	return &fakeRBACClient{assignments: map[string]string{}}
+}
+
+func (f *fakeRBACClient) GetRoleByUserID(ctx context.Context, userID string) (string, error) {
+	if f.assignments == nil {
+		return "user", nil
+	}
+	if role, ok := f.assignments[userID]; ok {
+		return role, nil
+	}
+	return "user", nil
+}
+
+func (f *fakeRBACClient) GetPermissionsByUserID(ctx context.Context, userID string) ([]string, error) {
+	return nil, nil
+}
+
+func (f *fakeRBACClient) CheckPermission(ctx context.Context, userID, permission string) (bool, error) {
+	return false, nil
+}
+
+func (f *fakeRBACClient) CheckRole(ctx context.Context, userID, role string) (bool, error) {
+	return false, nil
+}
+
+func (f *fakeRBACClient) AssignRole(ctx context.Context, userID, role string) error {
+	if f.assignments == nil {
+		f.assignments = map[string]string{}
+	}
+	f.assignments[userID] = role
+	return nil
+}
+
 type fakeTarantool struct {
 	email    string
 	password string
@@ -170,11 +208,42 @@ func TestAuthService_StartSignup(t *testing.T) {
 	profiles := newFakeProfileRepo()
 	providers := newFakeProviderRepo()
 	tarantoolClient := &fakeTarantool{}
-	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer, fakeAvatarIngestor{})
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, newFakeRBACClient(), fakePublisher{}, signer, fakeAvatarIngestor{})
 
 	uuid, err := auth.StartSignup(context.Background(), "trace-1", "user@example.com", "password123")
 	require.NoError(t, err)
 	assert.Equal(t, "uuid-1", uuid)
+}
+
+func TestAuthService_StartSignup_InvalidPassword(t *testing.T) {
+	cfg := &config.Config{JWTSecret: "secret", JWTTTLMinutes: time.Minute, JWTRefreshTTLMinutes: time.Hour}
+	signer, err := service.NewJWTSigner(cfg)
+	require.NoError(t, err)
+	users := newFakeUserRepo()
+	profiles := newFakeProfileRepo()
+	providers := newFakeProviderRepo()
+	tarantoolClient := &fakeTarantool{}
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, newFakeRBACClient(), fakePublisher{}, signer, fakeAvatarIngestor{})
+
+	_, err = auth.StartSignup(context.Background(), "trace-1", "user@example.com", "password")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "digit")
+}
+
+func TestAuthService_StartSignup_DuplicateEmail(t *testing.T) {
+	cfg := &config.Config{JWTSecret: "secret", JWTTTLMinutes: time.Minute, JWTRefreshTTLMinutes: time.Hour}
+	signer, err := service.NewJWTSigner(cfg)
+	require.NoError(t, err)
+	users := newFakeUserRepo()
+	users.users[strings.ToLower("user@example.com")] = &domain.User{ID: "user-1", Email: "user@example.com"}
+	profiles := newFakeProfileRepo()
+	providers := newFakeProviderRepo()
+	tarantoolClient := &fakeTarantool{}
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, newFakeRBACClient(), fakePublisher{}, signer, fakeAvatarIngestor{})
+
+	_, err = auth.StartSignup(context.Background(), "trace-1", "user@example.com", "password123")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "user already exists")
 }
 
 func TestAuthService_VerifySignup(t *testing.T) {
@@ -184,15 +253,34 @@ func TestAuthService_VerifySignup(t *testing.T) {
 	users := newFakeUserRepo()
 	profiles := newFakeProfileRepo()
 	providers := newFakeProviderRepo()
-	tarantoolClient := &fakeTarantool{email: "user@example.com", password: "password123"}
-	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer, fakeAvatarIngestor{})
+	tarantoolClient := &fakeTarantool{email: "USER@EXAMPLE.COM", password: "password123"}
+	rbacClient := newFakeRBACClient()
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, rbacClient, fakePublisher{}, signer, fakeAvatarIngestor{})
 
-	user, tokens, err := auth.VerifySignup(context.Background(), "trace-1", "uuid-1", "code")
+	user, tokens, err := auth.VerifySignup(context.Background(), "trace-1", "uuid-1", "0000")
 	require.NoError(t, err)
 	assert.NotNil(t, user)
 	assert.NotNil(t, tokens)
 	assert.NotEmpty(t, tokens.AccessToken)
 	assert.NotNil(t, user.PasswordHash)
+	assert.Equal(t, "user@example.com", user.Email)
+	assert.Equal(t, "user", rbacClient.assignments[user.ID])
+}
+
+func TestAuthService_VerifySignup_InvalidCode(t *testing.T) {
+	cfg := &config.Config{JWTSecret: "secret", JWTTTLMinutes: time.Minute, JWTRefreshTTLMinutes: time.Hour}
+	signer, err := service.NewJWTSigner(cfg)
+	require.NoError(t, err)
+	users := newFakeUserRepo()
+	profiles := newFakeProfileRepo()
+	providers := newFakeProviderRepo()
+	tarantoolClient := &fakeTarantool{email: "user@example.com", password: "password123"}
+	rbacClient := newFakeRBACClient()
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, rbacClient, fakePublisher{}, signer, fakeAvatarIngestor{})
+
+	_, _, err = auth.VerifySignup(context.Background(), "trace-1", "uuid-1", "12a4")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "verification code")
 }
 
 func TestAuthService_HandleOAuthCallback_CreateAndLink(t *testing.T) {
@@ -203,7 +291,7 @@ func TestAuthService_HandleOAuthCallback_CreateAndLink(t *testing.T) {
 	profiles := newFakeProfileRepo()
 	providers := newFakeProviderRepo()
 	tarantoolClient := &fakeTarantool{}
-	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, fakePublisher{}, signer, fakeAvatarIngestor{})
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, newFakeRBACClient(), fakePublisher{}, signer, fakeAvatarIngestor{})
 
 	displayName := "OAuth User"
 	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", "google", service.OAuthUserInfo{
@@ -237,7 +325,7 @@ func TestAuthService_HandleOAuthCallback_ExistingProvider(t *testing.T) {
 	providers.providers[providers.key("google", "oauth-1")] = &domain.UserProvider{ProviderType: "google", ProviderUserID: "oauth-1", UserID: existingUser.ID}
 
 	tarantoolClient := &fakeTarantool{}
-	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, fakePublisher{}, signer, fakeAvatarIngestor{})
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, newFakeRBACClient(), fakePublisher{}, signer, fakeAvatarIngestor{})
 
 	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", "google", service.OAuthUserInfo{
 		ProviderType:   "google",
@@ -264,7 +352,7 @@ func TestAuthService_HandleOAuthCallback_InactiveUser(t *testing.T) {
 	providers.providers[providers.key("google", "inactive-1")] = &domain.UserProvider{ProviderType: "google", ProviderUserID: "inactive-1", UserID: inactiveUser.ID}
 
 	tarantoolClient := &fakeTarantool{}
-	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, fakePublisher{}, signer, fakeAvatarIngestor{})
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, newFakeProfileRepo(), providers, tarantoolClient, newFakeRBACClient(), fakePublisher{}, signer, fakeAvatarIngestor{})
 
 	user, tokens, err := auth.HandleOAuthCallback(context.Background(), "trace-1", "google", service.OAuthUserInfo{
 		ProviderType:   "google",

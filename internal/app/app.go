@@ -76,7 +76,7 @@ func New(ctx context.Context) (*App, error) {
 		return nil, err
 	}
 	avatarIngestor := service.NewAvatarIngestor(filestorageClient, logger)
-	authService := service.NewAuthService(cfg, logger, userRepo, profileRepo, providerRepo, tarantoolClient, publisher, signer, avatarIngestor)
+	authService := service.NewAuthService(cfg, logger, userRepo, profileRepo, providerRepo, tarantoolClient, rbacClient, publisher, signer, avatarIngestor)
 	userService := service.NewUserService(userRepo, profileRepo, identityRepo, tarantoolClient)
 
 	authHandler := handlers.NewAuthHandler(authService)

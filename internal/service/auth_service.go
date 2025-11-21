@@ -18,6 +18,7 @@ import (
 	"github.com/example/user-service/internal/domain"
 	"github.com/example/user-service/internal/events"
 	"github.com/example/user-service/internal/ports/broker"
+	"github.com/example/user-service/internal/ports/rbac"
 	"github.com/example/user-service/internal/ports/tarantool"
 	"github.com/example/user-service/internal/repo"
 	pkglog "github.com/example/user-service/pkg/log"
@@ -27,6 +28,8 @@ var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrUserInactive       = errors.New("user inactive")
 )
+
+const defaultUserRole = "user"
 
 type AuthService interface {
 	StartSignup(ctx context.Context, traceID, email, password string) (string, error)
@@ -43,15 +46,16 @@ const (
 )
 
 type authService struct {
-	cfg       *config.Config
-	logger    pkglog.Logger
-	users     repo.UserRepository
-	profiles  repo.UserProfileRepository
-	providers repo.UserProviderRepository
-	tarantool tarantool.Client
-	publisher broker.Publisher
-	jwtSigner JWTSigner
-	avatars   AvatarIngestor
+	cfg        *config.Config
+	logger     pkglog.Logger
+	users      repo.UserRepository
+	profiles   repo.UserProfileRepository
+	providers  repo.UserProviderRepository
+	tarantool  tarantool.Client
+	rbac       rbac.Client
+	publisher  broker.Publisher
+	jwtSigner  JWTSigner
+	avatars    AvatarIngestor
 	httpClient *http.Client
 }
 
@@ -62,6 +66,7 @@ func NewAuthService(
 	profiles repo.UserProfileRepository,
 	providers repo.UserProviderRepository,
 	tarantool tarantool.Client,
+	rbacClient rbac.Client,
 	publisher broker.Publisher,
 	jwtSigner JWTSigner,
 	avatars AvatarIngestor,
@@ -73,6 +78,7 @@ func NewAuthService(
 		profiles:   profiles,
 		providers:  providers,
 		tarantool:  tarantool,
+		rbac:       rbacClient,
 		publisher:  publisher,
 		jwtSigner:  jwtSigner,
 		avatars:    avatars,
@@ -98,13 +104,19 @@ type oauthProfile struct {
 }
 
 func (s *authService) StartSignup(ctx context.Context, traceID, email, password string) (string, error) {
-	if err := validateEmail(email); err != nil {
+	normEmail := strings.ToLower(strings.TrimSpace(email))
+	if err := validateEmail(normEmail); err != nil {
 		return "", err
 	}
-	if len(password) < 8 {
-		return "", errors.New("password too short")
+	if err := validatePassword(password); err != nil {
+		return "", err
 	}
-	uuid, err := s.tarantool.StartRegistration(ctx, email, password)
+	if existing, err := s.users.FindByEmail(ctx, normEmail); err == nil && existing != nil {
+		return "", fmt.Errorf("user already exists")
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", err
+	}
+	uuid, err := s.tarantool.StartRegistration(ctx, normEmail, password)
 	if err != nil {
 		return "", err
 	}
@@ -113,22 +125,30 @@ func (s *authService) StartSignup(ctx context.Context, traceID, email, password 
 }
 
 func (s *authService) VerifySignup(ctx context.Context, traceID, uuid, code string) (*domain.User, *Tokens, error) {
+	code = strings.TrimSpace(code)
+	if err := validateVerificationCode(code); err != nil {
+		return nil, nil, err
+	}
 	result, err := s.tarantool.VerifyRegistration(ctx, uuid, code)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := validateEmail(result.Email); err != nil {
+	normEmail := strings.ToLower(strings.TrimSpace(result.Email))
+	if err := validateEmail(normEmail); err != nil {
 		return nil, nil, err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(result.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, nil, err
 	}
-	existing, err := s.users.FindByEmail(ctx, result.Email)
-	if err == nil && existing != nil {
+	existing, err := s.users.FindByEmail(ctx, normEmail)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil, err
+	}
+	if existing != nil {
 		return nil, nil, fmt.Errorf("user already exists")
 	}
-	user := &domain.User{Email: strings.ToLower(result.Email), IsActive: true}
+	user := &domain.User{Email: normEmail, IsActive: true}
 	hashStr := string(hash)
 	user.SetPasswordHash(hashStr)
 	if err := s.users.Create(ctx, user); err != nil {
@@ -141,7 +161,14 @@ func (s *authService) VerifySignup(ctx context.Context, traceID, uuid, code stri
 	if s.publisher != nil {
 		_ = s.publisher.Publish(ctx, "user.created", events.NewUserEvent("user.created", user.ID, user.Email, traceID))
 	}
-	tokens, err := s.issueTokens(user)
+	if err := s.assignDefaultRole(ctx, user.ID); err != nil {
+		return nil, nil, err
+	}
+	role, err := s.resolveRole(ctx, user.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	tokens, err := s.issueTokens(user, role)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -162,7 +189,11 @@ func (s *authService) SignIn(ctx context.Context, traceID, email, password strin
 	if err := bcrypt.CompareHashAndPassword([]byte(*user.PasswordHash), []byte(password)); err != nil {
 		return nil, nil, ErrInvalidCredentials
 	}
-	tokens, err := s.issueTokens(user)
+	role, err := s.resolveRole(ctx, user.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	tokens, err := s.issueTokens(user, role)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -192,7 +223,11 @@ func (s *authService) HandleOAuthCallback(ctx context.Context, traceID, provider
 		if !user.IsActive {
 			return nil, nil, ErrUserInactive
 		}
-		tokens, err := s.issueTokens(user)
+		role, err := s.resolveRole(ctx, user.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		tokens, err := s.issueTokens(user, role)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -209,7 +244,9 @@ func (s *authService) HandleOAuthCallback(ctx context.Context, traceID, provider
 		return nil, nil, err
 	}
 
+	created := false
 	if user == nil {
+		created = true
 		user = &domain.User{Email: normalizedEmail, IsActive: true}
 		if err := s.users.Create(ctx, user); err != nil {
 			return nil, nil, err
@@ -243,7 +280,18 @@ func (s *authService) HandleOAuthCallback(ctx context.Context, traceID, provider
 		providerRecord = existingProvider
 	}
 
-	tokens, err := s.issueTokens(user)
+	if created {
+		if err := s.assignDefaultRole(ctx, user.ID); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	role, err := s.resolveRole(ctx, user.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tokens, err := s.issueTokens(user, role)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -252,8 +300,16 @@ func (s *authService) HandleOAuthCallback(ctx context.Context, traceID, provider
 	return user, tokens, nil
 }
 
-func (s *authService) issueTokens(user *domain.User) (*Tokens, error) {
-	access, err := s.jwtSigner.SignAccessToken(user.ID, map[string]interface{}{"email": user.Email}, s.cfg.JWTTTLMinutes)
+func (s *authService) issueTokens(user *domain.User, role string) (*Tokens, error) {
+	if role == "" {
+		role = defaultUserRole
+	}
+	claims := map[string]interface{}{
+		"email": user.Email,
+		"role":  role,
+		"id":    user.ID,
+	}
+	access, err := s.jwtSigner.SignAccessToken(user.ID, claims, s.cfg.JWTTTLMinutes)
 	if err != nil {
 		return nil, err
 	}
@@ -269,10 +325,68 @@ func (s *authService) issueTokens(user *domain.User) (*Tokens, error) {
 }
 
 func validateEmail(email string) error {
+	if len(email) > 255 {
+		return fmt.Errorf("invalid email")
+	}
 	if _, err := mail.ParseAddress(email); err != nil {
 		return fmt.Errorf("invalid email")
 	}
 	return nil
+}
+
+func validatePassword(password string) error {
+	if len(password) < 8 {
+		return errors.New("password too short")
+	}
+	if len(password) > 255 {
+		return errors.New("password too long")
+	}
+	hasDigit := false
+	for _, r := range password {
+		if r < 33 || r > 126 {
+			return errors.New("password contains invalid characters")
+		}
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+		}
+	}
+	if !hasDigit {
+		return errors.New("password must contain at least one digit")
+	}
+	return nil
+}
+
+func validateVerificationCode(code string) error {
+	if len(code) != 4 {
+		return errors.New("verification code must contain 4 digits")
+	}
+	for _, r := range code {
+		if r < '0' || r > '9' {
+			return errors.New("verification code must contain only digits")
+		}
+	}
+	return nil
+}
+
+func (s *authService) assignDefaultRole(ctx context.Context, userID string) error {
+	if s.rbac == nil {
+		return nil
+	}
+	return s.rbac.AssignRole(ctx, userID, defaultUserRole)
+}
+
+func (s *authService) resolveRole(ctx context.Context, userID string) (string, error) {
+	if s.rbac == nil {
+		return defaultUserRole, nil
+	}
+	role, err := s.rbac.GetRoleByUserID(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if role == "" {
+		role = defaultUserRole
+	}
+	return role, nil
 }
 
 func (s *authService) googleAuthURL(state string) (string, error) {
