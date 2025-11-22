@@ -1,0 +1,92 @@
+package contract
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/example/user-service/internal/ports/rbac"
+)
+
+const (
+	testUserID   = "user-123"
+	testRoleKey  = "role-user"
+	testPerm     = "read:profile"
+	testPermBool = true
+)
+
+func TestRBACClientContract(t *testing.T) {
+	handler := newMockRBACHandler(t)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	client := rbac.NewHTTPClient(server.URL, 2*time.Second)
+
+	ctx := context.Background()
+
+	require.NoError(t, client.AssignRole(ctx, testUserID, testRoleKey))
+	require.True(t, handler.assignCalled)
+
+	role, err := client.GetRoleByUserID(ctx, testUserID)
+	require.NoError(t, err)
+	require.Equal(t, testRoleKey, role)
+
+	perms, err := client.GetPermissionsByUserID(ctx, testUserID)
+	require.NoError(t, err)
+	require.Equal(t, []string{testPerm}, perms)
+
+	allowed, err := client.CheckRole(ctx, testUserID, testRoleKey)
+	require.NoError(t, err)
+	require.True(t, allowed)
+
+	permitted, err := client.CheckPermission(ctx, testUserID, testPerm)
+	require.NoError(t, err)
+	require.Equal(t, testPermBool, permitted)
+}
+
+type mockRBACHandler struct {
+	t            *testing.T
+	assignCalled bool
+}
+
+func newMockRBACHandler(t *testing.T) *mockRBACHandler {
+	return &mockRBACHandler{t: t}
+}
+
+func (h *mockRBACHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/assign_role":
+		h.assignCalled = true
+		var payload struct {
+			Value struct {
+				UserID string `json:"user_id"`
+				Role   string `json:"role"`
+			} `json:"value"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		require.Equal(h.t, testUserID, payload.Value.UserID)
+		require.Equal(h.t, testRoleKey, payload.Value.Role)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	case "/get_role_by_user_id":
+		require.Equal(h.t, testUserID, r.URL.Query().Get("user_id"))
+		writeJSON(w, http.StatusOK, map[string]string{"role": testRoleKey})
+	case "/get_permissions_by_user_id_for_role":
+		require.Equal(h.t, testUserID, r.URL.Query().Get("user_id"))
+		writeJSON(w, http.StatusOK, map[string][]string{"permissions": {testPerm}})
+	case "/check_role_by_user_id":
+		require.Equal(h.t, testUserID, r.URL.Query().Get("user_id"))
+		require.Equal(h.t, testRoleKey, r.URL.Query().Get("role"))
+		writeJSON(w, http.StatusOK, map[string]bool{"allowed": true})
+	case "/check_permission_by_user_id":
+		require.Equal(h.t, testUserID, r.URL.Query().Get("user_id"))
+		require.Equal(h.t, testPerm, r.URL.Query().Get("permission"))
+		writeJSON(w, http.StatusOK, map[string]bool{"allowed": testPermBool})
+	default:
+		http.NotFound(w, r)
+	}
+}

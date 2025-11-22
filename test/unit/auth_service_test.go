@@ -164,6 +164,62 @@ func (f *fakeRBACClient) AssignRole(ctx context.Context, userID, role string) er
 	return nil
 }
 
+type recordingRBACClient struct {
+	assignCalled bool
+	assignedUser string
+	assignedRole string
+	getRoleCalls []string
+	roleByUser   map[string]string
+}
+
+func (r *recordingRBACClient) GetRoleByUserID(ctx context.Context, userID string) (string, error) {
+	r.getRoleCalls = append(r.getRoleCalls, userID)
+	if r.roleByUser != nil {
+		if role, ok := r.roleByUser[userID]; ok {
+			return role, nil
+		}
+	}
+	return "", nil
+}
+
+func (r *recordingRBACClient) GetPermissionsByUserID(ctx context.Context, userID string) ([]string, error) {
+	return nil, nil
+}
+
+func (r *recordingRBACClient) CheckPermission(ctx context.Context, userID, permission string) (bool, error) {
+	return false, nil
+}
+
+func (r *recordingRBACClient) CheckRole(ctx context.Context, userID, role string) (bool, error) {
+	return false, nil
+}
+
+func (r *recordingRBACClient) AssignRole(ctx context.Context, userID, role string) error {
+	r.assignCalled = true
+	r.assignedUser = userID
+	r.assignedRole = role
+	return nil
+}
+
+type recordingJWTSigner struct {
+	claims map[string]interface{}
+}
+
+func (r *recordingJWTSigner) SignAccessToken(subject string, claims map[string]interface{}, ttl time.Duration) (string, error) {
+	if claims == nil {
+		return "", errors.New("claims required")
+	}
+	r.claims = make(map[string]interface{}, len(claims))
+	for k, v := range claims {
+		r.claims[k] = v
+	}
+	return "access-token", nil
+}
+
+func (r *recordingJWTSigner) SignRefreshToken(subject string, ttl time.Duration) (string, error) {
+	return "refresh-token", nil
+}
+
 type fakeTarantool struct {
 	email    string
 	password string
@@ -265,6 +321,32 @@ func TestAuthService_VerifySignup(t *testing.T) {
 	assert.NotNil(t, user.PasswordHash)
 	assert.Equal(t, "user@example.com", user.Email)
 	assert.Equal(t, "user", rbacClient.assignments[user.ID])
+}
+
+func TestAuthService_VerifySignup_AssignsDefaultRoleAndResolvesUserRole(t *testing.T) {
+	cfg := &config.Config{JWTSecret: "secret", JWTTTLMinutes: time.Minute, JWTRefreshTTLMinutes: time.Hour}
+	jwtSigner := &recordingJWTSigner{}
+	users := newFakeUserRepo()
+	profiles := newFakeProfileRepo()
+	providers := newFakeProviderRepo()
+	tarantoolClient := &fakeTarantool{email: "user@example.com", password: "password123"}
+	expectedRole := "member"
+	rbacClient := &recordingRBACClient{roleByUser: map[string]string{"user-1": expectedRole}}
+	auth := service.NewAuthService(cfg, pkglog.New("test"), users, profiles, providers, tarantoolClient, rbacClient, fakePublisher{}, jwtSigner, fakeAvatarIngestor{})
+
+	user, tokens, err := auth.VerifySignup(context.Background(), "trace-1", "uuid-1", "0000")
+	require.NoError(t, err)
+	require.NotNil(t, user)
+	require.NotNil(t, tokens)
+	require.NotNil(t, jwtSigner.claims)
+
+	assert.True(t, rbacClient.assignCalled)
+	assert.Equal(t, user.ID, rbacClient.assignedUser)
+	assert.Equal(t, "user", rbacClient.assignedRole)
+	assert.Equal(t, []string{user.ID}, rbacClient.getRoleCalls)
+	assert.Equal(t, expectedRole, jwtSigner.claims["role"])
+	assert.Equal(t, "access-token", tokens.AccessToken)
+	assert.Equal(t, "refresh-token", tokens.RefreshToken)
 }
 
 func TestAuthService_VerifySignup_InvalidCode(t *testing.T) {
